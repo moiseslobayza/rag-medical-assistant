@@ -43,7 +43,12 @@ El sistema utiliza por defecto:
 
 La implementación contempla el formato recomendado por la familia E5, utilizando los prefijos `query:` para consultas y `passage:` para documentos.
 
-El trabajo original también comparó el modelo E5 con `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`. La evaluación comparativa se incorporará como una capa separada del proyecto.
+El proyecto incluye además una comparación de recuperación semántica entre:
+
+- `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`
+- `intfloat/multilingual-e5-small`
+
+La evaluación se realiza de forma independiente del modelo generativo para analizar específicamente la etapa de retrieval.
 
 ## Base de conocimiento
 
@@ -79,9 +84,13 @@ rag-medical-assistant/
 ├── data/
 │   └── knowledge_base.csv
 │
+├── notebooks/
+│   └── embedding_experiments.ipynb
+│
 ├── src/
 │   ├── __init__.py
-│   └── chatbot.py
+│   ├── chatbot.py
+│   └── evaluation.py
 │
 ├── main.py
 ├── requirements.txt
@@ -123,6 +132,29 @@ salir
 6. Chroma recupera los documentos más similares mediante búsqueda Top-K.
 7. El contexto recuperado se incorpora al prompt.
 8. FLAN-T5 genera una respuesta en español basada en ese contexto.
+
+## Evaluación de embeddings
+
+El módulo `src/evaluation.py` permite evaluar la recuperación semántica sin cargar el LLM.
+
+La comparación utiliza consultas reformuladas y mide si la pregunta esperada de la base de conocimiento aparece dentro de los primeros resultados recuperados.
+
+Se analizan:
+
+- `Top-1`
+- `Top-3`
+- `Top-5`
+- tasa de aciertos (`hit_rate`)
+- posición media de la pregunta esperada
+- errores de recuperación
+
+El experimento reproducible se encuentra en:
+
+```text
+notebooks/embedding_experiments.ipynb
+```
+
+El conjunto de evaluación es deliberadamente pequeño y se utiliza para comparar el comportamiento de los modelos dentro de este prototipo. No se presenta como un benchmark general de embeddings.
 
 ## Origen del proyecto
 
