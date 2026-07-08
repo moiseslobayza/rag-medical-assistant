@@ -33,6 +33,7 @@ Respuesta en español
 - Chroma
 - PyTorch
 - FLAN-T5
+- GitHub Actions
 
 ## Modelos
 
@@ -80,6 +81,10 @@ Respuesta: <respuesta>
 
 ```text
 rag-medical-assistant/
+│
+├── .github/
+│   └── workflows/
+│       └── validate.yml
 │
 ├── data/
 │   └── knowledge_base.csv
@@ -137,7 +142,7 @@ salir
 
 El módulo `src/evaluation.py` permite evaluar la recuperación semántica sin cargar el LLM.
 
-La comparación utiliza consultas reformuladas y mide si la pregunta esperada de la base de conocimiento aparece dentro de los primeros resultados recuperados.
+La comparación utiliza 10 consultas reformuladas y mide si la pregunta esperada de la base de conocimiento aparece dentro de los primeros resultados recuperados.
 
 Se analizan:
 
@@ -154,7 +159,47 @@ El experimento reproducible se encuentra en:
 notebooks/embedding_experiments.ipynb
 ```
 
-El conjunto de evaluación es deliberadamente pequeño y se utiliza para comparar el comportamiento de los modelos dentro de este prototipo. No se presenta como un benchmark general de embeddings.
+### Resultados observados
+
+Los siguientes resultados fueron obtenidos ejecutando la evaluación en GitHub Actions sobre las 10 consultas del prototipo:
+
+| Modelo | Top-1 | Top-3 | Top-5 | Posición media esperada |
+|---|---:|---:|---:|---:|
+| MiniLM multilingual | 80% | 80% | 100% | 1.8 |
+| multilingual-E5-small | 80% | 90% | 100% | 1.4 |
+
+En este conjunto pequeño, ambos modelos alcanzaron el mismo resultado en Top-1 y Top-5. E5 obtuvo una mayor tasa de aciertos en Top-3 y una mejor posición media de la pregunta esperada, por lo que se mantiene como modelo de embeddings por defecto del prototipo.
+
+El conjunto de evaluación es deliberadamente pequeño y se utiliza para comparar el comportamiento de los modelos dentro de este proyecto. Estos resultados no se presentan como un benchmark general de embeddings.
+
+## Validación end-to-end
+
+El proyecto incluye un workflow de GitHub Actions que:
+
+1. instala las dependencias,
+2. compila los módulos de Python,
+3. ejecuta un smoke test de retrieval con MiniLM y E5,
+4. carga E5 y FLAN-T5,
+5. recupera contexto desde Chroma,
+6. genera una respuesta no vacía con el pipeline RAG completo.
+
+La validación de runtime finalizó correctamente.
+
+### Limitación observada
+
+El smoke test funcional también permitió detectar un error semántico concreto.
+
+Ante la consulta:
+
+```text
+¿Cómo hago para cambiar la fecha de mi turno?
+```
+
+el retrieval con E5 y `top_k=3` recuperó documentos sobre datos necesarios para pedir un turno, cancelación y solicitud de turnos. El documento esperado sobre reprogramación no apareció dentro del Top-3. Como consecuencia, FLAN-T5 generó una respuesta relacionada con la cancelación del turno en lugar de explicar cómo reprogramarlo.
+
+Este caso muestra una limitación central de los sistemas RAG: que el pipeline pueda ejecutarse correctamente no implica que la respuesta sea semánticamente correcta. La calidad final depende de la recuperación de contexto y de la cobertura de la base de conocimiento.
+
+Entre las mejoras posibles se encuentran ampliar y reformular la base de conocimiento, evaluar estrategias de reranking y definir mecanismos de rechazo cuando el contexto recuperado no sea suficientemente confiable.
 
 ## Origen del proyecto
 
