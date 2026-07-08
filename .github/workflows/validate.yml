@@ -1,0 +1,97 @@
+name: Validate RAG project
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compile Python files
+        run: python -m compileall main.py src
+
+      - name: Run retrieval evaluation smoke test
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from src.evaluation import EvaluationCase, compare_embedding_models
+
+          knowledge_base = Path("data/knowledge_base.csv")
+          cases = [
+              EvaluationCase(
+                  query="Necesito cambiar la fecha de mi cita, ¿qué hago?",
+                  expected_question="¿Puedo reprogramar mi turno?",
+              ),
+              EvaluationCase(
+                  query="Tengo una emergencia, ¿me pueden atender ahora?",
+                  expected_question="¿Atienden urgencias?",
+              ),
+              EvaluationCase(
+                  query="¿Con qué medios puedo abonar la consulta?",
+                  expected_question="¿Cuáles son las formas de pago?",
+              ),
+          ]
+
+          summary, details = compare_embedding_models(
+              knowledge_base_path=knowledge_base,
+              embedding_models=[
+                  "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+                  "intfloat/multilingual-e5-small",
+              ],
+              cases=cases,
+              top_k_values=(1, 3),
+          )
+
+          print(summary.to_string(index=False))
+          print(details.to_string(index=False))
+
+          assert not summary.empty
+          assert not details.empty
+          PY
+
+      - name: Run end-to-end RAG smoke test
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from src import MedicalRAGChatbot
+
+          chatbot = MedicalRAGChatbot.from_csv(
+              Path("data/knowledge_base.csv"),
+              embedding_model="intfloat/multilingual-e5-small",
+              llm_model="google/flan-t5-small",
+              top_k=3,
+          )
+
+          question = "¿Cómo hago para cambiar la fecha de mi turno?"
+          retrieval = chatbot.retrieve_context(question)
+          answer = chatbot.answer(question)
+
+          print("Question:", question)
+          print("Retrieved documents:")
+          for index, (document, distance) in enumerate(
+              zip(retrieval.documents, retrieval.distances), start=1
+          ):
+              print(f"{index}. distance={distance:.4f} | {document}")
+          print("Generated answer:", answer)
+
+          assert retrieval.documents
+          assert answer.strip()
+          PY
