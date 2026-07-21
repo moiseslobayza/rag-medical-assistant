@@ -22,9 +22,8 @@ def _install_import_stub(name: str, **attributes: object) -> None:
     sys.modules[name] = module
 
 
-# src.chatbot imports these libraries at module load time. Replacing them before
-# importing the package guarantees that this suite cannot load real models or
-# contact external services.
+# These stubs guarantee that an unexpected integration call cannot load real
+# models or contact external services during the unit suite.
 _install_import_stub("chromadb", EphemeralClient=_integration_dependency_used)
 _install_import_stub(
     "sentence_transformers",
@@ -44,6 +43,7 @@ _install_import_stub(
 )
 
 import src.chatbot as chatbot_module  # noqa: E402
+import src.retrieval as retrieval_module  # noqa: E402
 
 
 class ListResult:
@@ -107,13 +107,13 @@ def pipeline_doubles(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     )
 
     monkeypatch.setattr(
-        chatbot_module,
-        "SentenceTransformer",
+        retrieval_module,
+        "_load_embedding_model",
         Mock(return_value=embedding),
     )
     monkeypatch.setattr(
-        chatbot_module.chromadb,
-        "EphemeralClient",
+        retrieval_module,
+        "_create_chroma_client",
         Mock(return_value=chroma_client),
     )
     monkeypatch.setattr(

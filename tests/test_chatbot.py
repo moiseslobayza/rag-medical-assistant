@@ -49,6 +49,12 @@ def test_from_csv_loads_valid_knowledge_base(
     chatbot = build_chatbot(tmp_path)
 
     assert chatbot.knowledge_base.to_dict("records") == VALID_ROWS
+    assert chatbot.documents is chatbot.retriever.documents
+    assert chatbot.ids is chatbot.retriever.ids
+    assert chatbot.metadatas is chatbot.retriever.metadatas
+    assert chatbot.embedding_model is chatbot.retriever.embedding_model
+    assert chatbot.client is chatbot.retriever.client
+    assert chatbot.collection is chatbot.retriever.collection
 
 
 def test_from_csv_rejects_missing_file_before_loading_models(tmp_path: Path) -> None:
@@ -138,6 +144,18 @@ def test_e5_query_prefix_is_sent_to_embedder(
         metadatas=[pipeline_doubles.indexed["metadatas"][0]],
         distances=[0.1],
     )
+
+
+def test_facade_uses_reassigned_top_k_for_retrieval(
+    tmp_path: Path,
+    pipeline_doubles: object,
+) -> None:
+    chatbot = build_chatbot(tmp_path, top_k=5)
+    chatbot.top_k = 1
+
+    chatbot.retrieve_context("Consulta")
+
+    assert pipeline_doubles.collection.query.call_args.kwargs["n_results"] == 1
 
 
 @pytest.mark.parametrize("top_k", [0, -1])
