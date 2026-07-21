@@ -22,9 +22,8 @@ def _install_import_stub(name: str, **attributes: object) -> None:
     sys.modules[name] = module
 
 
-# src.chatbot imports these libraries at module load time. Replacing them before
-# importing the package guarantees that this suite cannot load real models or
-# contact external services.
+# These stubs guarantee that an unexpected integration call cannot load real
+# models or contact external services during the unit suite.
 _install_import_stub("chromadb", EphemeralClient=_integration_dependency_used)
 _install_import_stub(
     "sentence_transformers",
@@ -43,7 +42,8 @@ _install_import_stub(
     inference_mode=_integration_dependency_used,
 )
 
-import src.chatbot as chatbot_module  # noqa: E402
+import src.generation as generation_module  # noqa: E402
+import src.retrieval as retrieval_module  # noqa: E402
 
 
 class ListResult:
@@ -107,26 +107,30 @@ def pipeline_doubles(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     )
 
     monkeypatch.setattr(
-        chatbot_module,
-        "SentenceTransformer",
+        retrieval_module,
+        "_load_embedding_model",
         Mock(return_value=embedding),
     )
     monkeypatch.setattr(
-        chatbot_module.chromadb,
-        "EphemeralClient",
+        retrieval_module,
+        "_create_chroma_client",
         Mock(return_value=chroma_client),
     )
     monkeypatch.setattr(
-        chatbot_module,
-        "AutoTokenizer",
-        SimpleNamespace(from_pretrained=Mock(return_value=tokenizer)),
+        generation_module,
+        "_load_torch",
+        Mock(return_value=fake_torch),
     )
     monkeypatch.setattr(
-        chatbot_module,
-        "AutoModelForSeq2SeqLM",
-        SimpleNamespace(from_pretrained=Mock(return_value=language_model)),
+        generation_module,
+        "_load_tokenizer",
+        Mock(return_value=tokenizer),
     )
-    monkeypatch.setattr(chatbot_module, "torch", fake_torch)
+    monkeypatch.setattr(
+        generation_module,
+        "_load_language_model",
+        Mock(return_value=language_model),
+    )
 
     return SimpleNamespace(
         embedding=embedding,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
+from unittest.mock import call
 
 import pytest
 
@@ -48,6 +49,24 @@ def test_from_csv_loads_valid_knowledge_base(
     chatbot = build_chatbot(tmp_path)
 
     assert chatbot.knowledge_base.to_dict("records") == VALID_ROWS
+    assert chatbot.documents is chatbot.retriever.documents
+    assert chatbot.ids is chatbot.retriever.ids
+    assert chatbot.metadatas is chatbot.retriever.metadatas
+    assert chatbot.embedding_model is chatbot.retriever.embedding_model
+    assert chatbot.client is chatbot.retriever.client
+    assert chatbot.collection is chatbot.retriever.collection
+    assert chatbot.device == chatbot.generator.device
+    assert chatbot.tokenizer is chatbot.generator.tokenizer
+    assert chatbot.llm is chatbot.generator.llm
+
+
+def test_from_csv_rejects_missing_file_before_loading_models(tmp_path: Path) -> None:
+    missing_path = tmp_path / "missing.csv"
+
+    with pytest.raises(FileNotFoundError) as error:
+        MedicalRAGChatbot.from_csv(missing_path)
+
+    assert str(error.value) == f"Knowledge base not found: {missing_path}"
 
 
 def test_from_csv_rejects_missing_required_columns(tmp_path: Path) -> None:
@@ -99,6 +118,14 @@ def test_documents_and_e5_passage_prefix_are_indexed(
     assert first_embedding_call.args[0] == [
         f"passage: {document}" for document in expected_documents
     ]
+    assert first_embedding_call.kwargs == {
+        "convert_to_numpy": True,
+        "normalize_embeddings": True,
+    }
+    pipeline_doubles.chroma_client.create_collection.assert_called_once_with(
+        name="medical_office_knowledge",
+        metadata={"hnsw:space": "cosine"},
+    )
 
 
 def test_e5_query_prefix_is_sent_to_embedder(
@@ -111,11 +138,44 @@ def test_e5_query_prefix_is_sent_to_embedder(
 
     last_embedding_call = pipeline_doubles.embedding.encode.call_args_list[-1]
     assert last_embedding_call.args[0] == ["query: ¿Cómo reservo?"]
+    assert last_embedding_call.kwargs == {
+        "convert_to_numpy": True,
+        "normalize_embeddings": True,
+    }
     assert retrieval == RetrievalResult(
         documents=[pipeline_doubles.indexed["documents"][0]],
         metadatas=[pipeline_doubles.indexed["metadatas"][0]],
         distances=[0.1],
     )
+
+
+def test_facade_uses_reassigned_top_k_for_retrieval(
+    tmp_path: Path,
+    pipeline_doubles: object,
+) -> None:
+    chatbot = build_chatbot(tmp_path, top_k=5)
+    chatbot.top_k = 1
+
+    chatbot.retrieve_context("Consulta")
+
+    assert pipeline_doubles.collection.query.call_args.kwargs["n_results"] == 1
+
+
+def test_facade_forwards_reassigned_generation_attributes(
+    tmp_path: Path,
+    pipeline_doubles: object,
+) -> None:
+    chatbot = build_chatbot(tmp_path)
+    replacement_tokenizer = object()
+    replacement_llm = object()
+
+    chatbot.device = "cuda"
+    chatbot.tokenizer = replacement_tokenizer
+    chatbot.llm = replacement_llm
+
+    assert chatbot.generator.device == "cuda"
+    assert chatbot.generator.tokenizer is replacement_tokenizer
+    assert chatbot.generator.llm is replacement_llm
 
 
 @pytest.mark.parametrize("top_k", [0, -1])
@@ -156,10 +216,41 @@ def test_pipeline_uses_retrieval_context_and_generation_doubles(
 
     assert answer == "Respuesta generada de prueba."
     assert pipeline_doubles.collection.query.call_args.kwargs["n_results"] == 2
-    prompt = pipeline_doubles.tokenizer.call_args.args[0]
-    assert question in prompt
-    assert all(
-        document in prompt for document in pipeline_doubles.indexed["documents"]
+    context = "\n\n".join(pipeline_doubles.indexed["documents"])
+    expected_prompt = f"""
+Use the context to answer the question.
+Answer only in Spanish.
+Do not invent information.
+If the context does not contain enough information, say that the consultorio should be contacted directly.
+
+Context:
+{context}
+
+Question:
+{question}
+
+Answer in Spanish:
+""".strip()
+    assert pipeline_doubles.tokenizer.call_args == call(
+        expected_prompt,
+        return_tensors="pt",
+        truncation=True,
+        max_length=512,
     )
-    pipeline_doubles.language_model.generate.assert_called_once()
+
+    generate_kwargs = pipeline_doubles.language_model.generate.call_args.kwargs
+    assert set(generate_kwargs) == {
+        "input_ids",
+        "attention_mask",
+        "max_new_tokens",
+        "do_sample",
+        "num_beams",
+    }
+    assert generate_kwargs["max_new_tokens"] == 100
+    assert generate_kwargs["do_sample"] is False
+    assert generate_kwargs["num_beams"] == 4
+    pipeline_doubles.tokenizer.decode.assert_called_once_with(
+        [101, 102],
+        skip_special_tokens=True,
+    )
     pipeline_doubles.torch.inference_mode.assert_called_once_with()

@@ -1,35 +1,43 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
-import chromadb
 import pandas as pd
-import torch
-from sentence_transformers import SentenceTransformer
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+
+from .config import DEFAULT_RAG_CONFIG
+from .generation import FlanT5Generator
+from .knowledge_base import (
+    REQUIRED_COLUMNS as KNOWLEDGE_BASE_REQUIRED_COLUMNS,
+    build_documents,
+    build_ids,
+    build_metadatas,
+    load_knowledge_base,
+    validate_knowledge_base,
+)
+from .retrieval import (
+    ChromaRetriever,
+    RetrievalResult,
+    prepare_documents,
+    prepare_query,
+    uses_e5,
+    validate_top_k,
+)
+from .service import RAGService
 
 
-@dataclass(frozen=True)
-class RetrievalResult:
-    documents: list[str]
-    metadatas: list[dict[str, str]]
-    distances: list[float]
-
-
-class MedicalRAGChatbot:
+class MedicalRAGChatbot(RAGService):
     """RAG chatbot for administrative questions about a medical office."""
 
-    REQUIRED_COLUMNS = {"pregunta", "respuesta"}
+    REQUIRED_COLUMNS = set(KNOWLEDGE_BASE_REQUIRED_COLUMNS)
 
     def __init__(
         self,
         knowledge_base: pd.DataFrame,
-        embedding_model: str = "intfloat/multilingual-e5-small",
-        llm_model: str = "google/flan-t5-small",
-        collection_name: str = "medical_office_knowledge",
-        top_k: int = 3,
+        embedding_model: str = DEFAULT_RAG_CONFIG.embedding_model,
+        llm_model: str = DEFAULT_RAG_CONFIG.llm_model,
+        collection_name: str = DEFAULT_RAG_CONFIG.collection_name,
+        top_k: int = DEFAULT_RAG_CONFIG.top_k,
     ) -> None:
         self.knowledge_base = self._validate_knowledge_base(knowledge_base)
         self.embedding_model_name = embedding_model
@@ -37,35 +45,54 @@ class MedicalRAGChatbot:
         self.collection_name = collection_name
         self.top_k = self._validate_top_k(top_k)
 
-        self.embedding_model = SentenceTransformer(self.embedding_model_name)
         self.documents = self._build_documents(self.knowledge_base)
-        self.ids = [f"doc_{index}" for index in range(len(self.documents))]
+        self.ids = build_ids(self.documents)
         self.metadatas = self._build_metadatas(self.knowledge_base)
 
-        prepared_documents = self._prepare_documents(self.documents)
-        document_embeddings = self.embedding_model.encode(
-            prepared_documents,
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-        ).tolist()
-
-        self.client = chromadb.EphemeralClient()
-        self.collection = self.client.create_collection(
-            name=self.collection_name,
-            metadata={"hnsw:space": "cosine"},
-        )
-        self.collection.add(
-            ids=self.ids,
+        self.retriever = ChromaRetriever(
             documents=self.documents,
-            embeddings=document_embeddings,
+            ids=self.ids,
             metadatas=self.metadatas,
+            embedding_model_name=self.embedding_model_name,
+            collection_name=self.collection_name,
+            top_k=self.top_k,
+        )
+        self.documents = self.retriever.documents
+        self.ids = self.retriever.ids
+        self.metadatas = self.retriever.metadatas
+        self.embedding_model = self.retriever.embedding_model
+        self.client = self.retriever.client
+        self.collection = self.retriever.collection
+
+        generator = FlanT5Generator(llm_model_name=self.llm_model_name)
+        super().__init__(
+            retriever=self.retriever,
+            generator=generator,
         )
 
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.tokenizer = AutoTokenizer.from_pretrained(self.llm_model_name)
-        self.llm = AutoModelForSeq2SeqLM.from_pretrained(self.llm_model_name).to(
-            self.device
-        )
+    @property
+    def device(self) -> str:
+        return self.generator.device
+
+    @device.setter
+    def device(self, value: str) -> None:
+        self.generator.device = value
+
+    @property
+    def tokenizer(self) -> Any:
+        return self.generator.tokenizer
+
+    @tokenizer.setter
+    def tokenizer(self, value: Any) -> None:
+        self.generator.tokenizer = value
+
+    @property
+    def llm(self) -> Any:
+        return self.generator.llm
+
+    @llm.setter
+    def llm(self, value: Any) -> None:
+        self.generator.llm = value
 
     @classmethod
     def from_csv(
@@ -73,127 +100,44 @@ class MedicalRAGChatbot:
         path: str | Path,
         **kwargs,
     ) -> "MedicalRAGChatbot":
-        csv_path = Path(path)
-        if not csv_path.exists():
-            raise FileNotFoundError(f"Knowledge base not found: {csv_path}")
-
-        knowledge_base = pd.read_csv(csv_path)
+        knowledge_base = load_knowledge_base(path)
         return cls(knowledge_base=knowledge_base, **kwargs)
 
     @classmethod
     def _validate_knowledge_base(cls, knowledge_base: pd.DataFrame) -> pd.DataFrame:
-        missing_columns = cls.REQUIRED_COLUMNS - set(knowledge_base.columns)
-        if missing_columns:
-            missing = ", ".join(sorted(missing_columns))
-            raise ValueError(f"Missing required columns: {missing}")
-
-        validated = knowledge_base.copy()
-        validated = validated.dropna(subset=["pregunta", "respuesta"])
-        validated["pregunta"] = validated["pregunta"].astype(str).str.strip()
-        validated["respuesta"] = validated["respuesta"].astype(str).str.strip()
-        validated = validated[
-            (validated["pregunta"] != "") & (validated["respuesta"] != "")
-        ].reset_index(drop=True)
-
-        if validated.empty:
-            raise ValueError("The knowledge base contains no valid records.")
-
-        return validated
+        return validate_knowledge_base(
+            knowledge_base,
+            required_columns=cls.REQUIRED_COLUMNS,
+        )
 
     @staticmethod
     def _validate_top_k(top_k: int) -> int:
-        if top_k < 1:
-            raise ValueError("top_k must be greater than or equal to 1.")
-        return top_k
+        return validate_top_k(top_k)
 
     @staticmethod
     def _build_documents(knowledge_base: pd.DataFrame) -> list[str]:
-        return [
-            f"Pregunta frecuente: {row.pregunta}\nRespuesta: {row.respuesta}"
-            for row in knowledge_base.itertuples(index=False)
-        ]
+        return build_documents(knowledge_base)
 
     @staticmethod
     def _build_metadatas(knowledge_base: pd.DataFrame) -> list[dict[str, str]]:
-        return [
-            {
-                "pregunta_original": str(row.pregunta),
-                "respuesta_original": str(row.respuesta),
-            }
-            for row in knowledge_base.itertuples(index=False)
-        ]
+        return build_metadatas(knowledge_base)
 
     def _uses_e5(self) -> bool:
-        return "e5" in self.embedding_model_name.lower()
+        return uses_e5(self.embedding_model_name)
 
     def _prepare_documents(self, documents: Iterable[str]) -> list[str]:
-        if self._uses_e5():
-            return [f"passage: {document}" for document in documents]
-        return list(documents)
+        return prepare_documents(documents, self.embedding_model_name)
 
     def _prepare_query(self, question: str) -> str:
-        question = question.strip()
-        if not question:
-            raise ValueError("The question cannot be empty.")
-
-        if self._uses_e5():
-            return f"query: {question}"
-        return question
+        return prepare_query(question, self.embedding_model_name)
 
     def retrieve_context(self, question: str) -> RetrievalResult:
-        prepared_question = self._prepare_query(question)
-        question_embedding = self.embedding_model.encode(
-            [prepared_question],
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-        ).tolist()
-
-        result_count = min(self.top_k, len(self.documents))
-        results = self.collection.query(
-            query_embeddings=question_embedding,
-            n_results=result_count,
-        )
-
-        return RetrievalResult(
-            documents=results["documents"][0],
-            metadatas=results["metadatas"][0],
-            distances=results["distances"][0],
-        )
+        self.retriever.embedding_model_name = self.embedding_model_name
+        self.retriever.embedding_model = self.embedding_model
+        self.retriever.documents = self.documents
+        self.retriever.top_k = self.top_k
+        self.retriever.collection = self.collection
+        return super().retrieve_context(question)
 
     def answer(self, question: str) -> str:
-        retrieval = self.retrieve_context(question)
-        context = "\n\n".join(retrieval.documents)
-
-        prompt = f"""
-Use the context to answer the question.
-Answer only in Spanish.
-Do not invent information.
-If the context does not contain enough information, say that the consultorio should be contacted directly.
-
-Context:
-{context}
-
-Question:
-{question}
-
-Answer in Spanish:
-""".strip()
-
-        inputs = self.tokenizer(
-            prompt,
-            return_tensors="pt",
-            truncation=True,
-            max_length=512,
-        )
-        inputs = {key: value.to(self.device) for key, value in inputs.items()}
-
-        with torch.inference_mode():
-            outputs = self.llm.generate(
-                **inputs,
-                max_new_tokens=100,
-                do_sample=False,
-                num_beams=4,
-            )
-
-        response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-        return response.strip()
+        return super().answer(question)

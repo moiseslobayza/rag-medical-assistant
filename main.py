@@ -1,40 +1,22 @@
-from pathlib import Path
-
 from src import MedicalRAGChatbot
+from src.cli import main as run_cli
+from src.config import DEFAULT_RAG_CONFIG
 
 
-KNOWLEDGE_BASE_PATH = Path("data/knowledge_base.csv")
+KNOWLEDGE_BASE_PATH = DEFAULT_RAG_CONFIG.knowledge_base_path
+
+
+def _create_chatbot() -> MedicalRAGChatbot:
+    return MedicalRAGChatbot.from_csv(
+        KNOWLEDGE_BASE_PATH,
+        embedding_model=DEFAULT_RAG_CONFIG.embedding_model,
+        llm_model=DEFAULT_RAG_CONFIG.llm_model,
+        top_k=DEFAULT_RAG_CONFIG.top_k,
+    )
 
 
 def main() -> None:
-    print("Cargando modelos y base de conocimiento...")
-
-    chatbot = MedicalRAGChatbot.from_csv(
-        KNOWLEDGE_BASE_PATH,
-        embedding_model="intfloat/multilingual-e5-small",
-        llm_model="google/flan-t5-small",
-        top_k=3,
-    )
-
-    print("\nRAG Medical Assistant listo.")
-    print("Escribí una consulta administrativa o 'salir' para finalizar.\n")
-
-    while True:
-        question = input("Usuario: ").strip()
-
-        if question.lower() in {"salir", "exit", "quit"}:
-            print("Asistente finalizado.")
-            break
-
-        if not question:
-            print("Asistente: Ingresá una consulta válida.\n")
-            continue
-
-        try:
-            response = chatbot.answer(question)
-            print(f"Asistente: {response}\n")
-        except Exception as exc:
-            print(f"Error al procesar la consulta: {exc}\n")
+    run_cli(chatbot_factory=_create_chatbot)
 
 
 if __name__ == "__main__":
