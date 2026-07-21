@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
+from unittest.mock import call
 
 import pytest
 
@@ -156,10 +157,41 @@ def test_pipeline_uses_retrieval_context_and_generation_doubles(
 
     assert answer == "Respuesta generada de prueba."
     assert pipeline_doubles.collection.query.call_args.kwargs["n_results"] == 2
-    prompt = pipeline_doubles.tokenizer.call_args.args[0]
-    assert question in prompt
-    assert all(
-        document in prompt for document in pipeline_doubles.indexed["documents"]
+    context = "\n\n".join(pipeline_doubles.indexed["documents"])
+    expected_prompt = f"""
+Use the context to answer the question.
+Answer only in Spanish.
+Do not invent information.
+If the context does not contain enough information, say that the consultorio should be contacted directly.
+
+Context:
+{context}
+
+Question:
+{question}
+
+Answer in Spanish:
+""".strip()
+    assert pipeline_doubles.tokenizer.call_args == call(
+        expected_prompt,
+        return_tensors="pt",
+        truncation=True,
+        max_length=512,
     )
-    pipeline_doubles.language_model.generate.assert_called_once()
+
+    generate_kwargs = pipeline_doubles.language_model.generate.call_args.kwargs
+    assert set(generate_kwargs) == {
+        "input_ids",
+        "attention_mask",
+        "max_new_tokens",
+        "do_sample",
+        "num_beams",
+    }
+    assert generate_kwargs["max_new_tokens"] == 100
+    assert generate_kwargs["do_sample"] is False
+    assert generate_kwargs["num_beams"] == 4
+    pipeline_doubles.tokenizer.decode.assert_called_once_with(
+        [101, 102],
+        skip_special_tokens=True,
+    )
     pipeline_doubles.torch.inference_mode.assert_called_once_with()
