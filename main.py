@@ -1,9 +1,8 @@
-from pathlib import Path
-
 from src import MedicalRAGChatbot
+from src.config import DEFAULT_RAG_CONFIG
 
 
-KNOWLEDGE_BASE_PATH = Path("data/knowledge_base.csv")
+KNOWLEDGE_BASE_PATH = DEFAULT_RAG_CONFIG.knowledge_base_path
 
 
 def main() -> None:
@@ -11,9 +10,9 @@ def main() -> None:
 
     chatbot = MedicalRAGChatbot.from_csv(
         KNOWLEDGE_BASE_PATH,
-        embedding_model="intfloat/multilingual-e5-small",
-        llm_model="google/flan-t5-small",
-        top_k=3,
+        embedding_model=DEFAULT_RAG_CONFIG.embedding_model,
+        llm_model=DEFAULT_RAG_CONFIG.llm_model,
+        top_k=DEFAULT_RAG_CONFIG.top_k,
     )
 
     print("\nRAG Medical Assistant listo.")

@@ -10,6 +10,16 @@ import torch
 from sentence_transformers import SentenceTransformer
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
+from .config import DEFAULT_RAG_CONFIG
+from .knowledge_base import (
+    REQUIRED_COLUMNS as KNOWLEDGE_BASE_REQUIRED_COLUMNS,
+    build_documents,
+    build_ids,
+    build_metadatas,
+    load_knowledge_base,
+    validate_knowledge_base,
+)
+
 
 @dataclass(frozen=True)
 class RetrievalResult:
@@ -21,15 +31,15 @@ class RetrievalResult:
 class MedicalRAGChatbot:
     """RAG chatbot for administrative questions about a medical office."""
 
-    REQUIRED_COLUMNS = {"pregunta", "respuesta"}
+    REQUIRED_COLUMNS = set(KNOWLEDGE_BASE_REQUIRED_COLUMNS)
 
     def __init__(
         self,
         knowledge_base: pd.DataFrame,
-        embedding_model: str = "intfloat/multilingual-e5-small",
-        llm_model: str = "google/flan-t5-small",
-        collection_name: str = "medical_office_knowledge",
-        top_k: int = 3,
+        embedding_model: str = DEFAULT_RAG_CONFIG.embedding_model,
+        llm_model: str = DEFAULT_RAG_CONFIG.llm_model,
+        collection_name: str = DEFAULT_RAG_CONFIG.collection_name,
+        top_k: int = DEFAULT_RAG_CONFIG.top_k,
     ) -> None:
         self.knowledge_base = self._validate_knowledge_base(knowledge_base)
         self.embedding_model_name = embedding_model
@@ -39,20 +49,22 @@ class MedicalRAGChatbot:
 
         self.embedding_model = SentenceTransformer(self.embedding_model_name)
         self.documents = self._build_documents(self.knowledge_base)
-        self.ids = [f"doc_{index}" for index in range(len(self.documents))]
+        self.ids = build_ids(self.documents)
         self.metadatas = self._build_metadatas(self.knowledge_base)
 
         prepared_documents = self._prepare_documents(self.documents)
         document_embeddings = self.embedding_model.encode(
             prepared_documents,
-            convert_to_numpy=True,
-            normalize_embeddings=True,
+            convert_to_numpy=DEFAULT_RAG_CONFIG.embedding_convert_to_numpy,
+            normalize_embeddings=DEFAULT_RAG_CONFIG.normalize_embeddings,
         ).tolist()
 
         self.client = chromadb.EphemeralClient()
         self.collection = self.client.create_collection(
             name=self.collection_name,
-            metadata={"hnsw:space": "cosine"},
+            metadata={
+                "hnsw:space": DEFAULT_RAG_CONFIG.chroma_distance_metric,
+            },
         )
         self.collection.add(
             ids=self.ids,
@@ -73,32 +85,15 @@ class MedicalRAGChatbot:
         path: str | Path,
         **kwargs,
     ) -> "MedicalRAGChatbot":
-        csv_path = Path(path)
-        if not csv_path.exists():
-            raise FileNotFoundError(f"Knowledge base not found: {csv_path}")
-
-        knowledge_base = pd.read_csv(csv_path)
+        knowledge_base = load_knowledge_base(path)
         return cls(knowledge_base=knowledge_base, **kwargs)
 
     @classmethod
     def _validate_knowledge_base(cls, knowledge_base: pd.DataFrame) -> pd.DataFrame:
-        missing_columns = cls.REQUIRED_COLUMNS - set(knowledge_base.columns)
-        if missing_columns:
-            missing = ", ".join(sorted(missing_columns))
-            raise ValueError(f"Missing required columns: {missing}")
-
-        validated = knowledge_base.copy()
-        validated = validated.dropna(subset=["pregunta", "respuesta"])
-        validated["pregunta"] = validated["pregunta"].astype(str).str.strip()
-        validated["respuesta"] = validated["respuesta"].astype(str).str.strip()
-        validated = validated[
-            (validated["pregunta"] != "") & (validated["respuesta"] != "")
-        ].reset_index(drop=True)
-
-        if validated.empty:
-            raise ValueError("The knowledge base contains no valid records.")
-
-        return validated
+        return validate_knowledge_base(
+            knowledge_base,
+            required_columns=cls.REQUIRED_COLUMNS,
+        )
 
     @staticmethod
     def _validate_top_k(top_k: int) -> int:
@@ -108,20 +103,11 @@ class MedicalRAGChatbot:
 
     @staticmethod
     def _build_documents(knowledge_base: pd.DataFrame) -> list[str]:
-        return [
-            f"Pregunta frecuente: {row.pregunta}\nRespuesta: {row.respuesta}"
-            for row in knowledge_base.itertuples(index=False)
-        ]
+        return build_documents(knowledge_base)
 
     @staticmethod
     def _build_metadatas(knowledge_base: pd.DataFrame) -> list[dict[str, str]]:
-        return [
-            {
-                "pregunta_original": str(row.pregunta),
-                "respuesta_original": str(row.respuesta),
-            }
-            for row in knowledge_base.itertuples(index=False)
-        ]
+        return build_metadatas(knowledge_base)
 
     def _uses_e5(self) -> bool:
         return "e5" in self.embedding_model_name.lower()
@@ -144,8 +130,8 @@ class MedicalRAGChatbot:
         prepared_question = self._prepare_query(question)
         question_embedding = self.embedding_model.encode(
             [prepared_question],
-            convert_to_numpy=True,
-            normalize_embeddings=True,
+            convert_to_numpy=DEFAULT_RAG_CONFIG.embedding_convert_to_numpy,
+            normalize_embeddings=DEFAULT_RAG_CONFIG.normalize_embeddings,
         ).tolist()
 
         result_count = min(self.top_k, len(self.documents))
@@ -181,19 +167,22 @@ Answer in Spanish:
 
         inputs = self.tokenizer(
             prompt,
-            return_tensors="pt",
-            truncation=True,
-            max_length=512,
+            return_tensors=DEFAULT_RAG_CONFIG.tokenizer_return_tensors,
+            truncation=DEFAULT_RAG_CONFIG.tokenizer_truncation,
+            max_length=DEFAULT_RAG_CONFIG.tokenizer_max_length,
         )
         inputs = {key: value.to(self.device) for key, value in inputs.items()}
 
         with torch.inference_mode():
             outputs = self.llm.generate(
                 **inputs,
-                max_new_tokens=100,
-                do_sample=False,
-                num_beams=4,
+                max_new_tokens=DEFAULT_RAG_CONFIG.max_new_tokens,
+                do_sample=DEFAULT_RAG_CONFIG.do_sample,
+                num_beams=DEFAULT_RAG_CONFIG.num_beams,
             )
 
-        response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        response = self.tokenizer.decode(
+            outputs[0],
+            skip_special_tokens=DEFAULT_RAG_CONFIG.skip_special_tokens,
+        )
         return response.strip()

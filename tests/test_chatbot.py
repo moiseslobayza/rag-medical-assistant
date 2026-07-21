@@ -51,6 +51,15 @@ def test_from_csv_loads_valid_knowledge_base(
     assert chatbot.knowledge_base.to_dict("records") == VALID_ROWS
 
 
+def test_from_csv_rejects_missing_file_before_loading_models(tmp_path: Path) -> None:
+    missing_path = tmp_path / "missing.csv"
+
+    with pytest.raises(FileNotFoundError) as error:
+        MedicalRAGChatbot.from_csv(missing_path)
+
+    assert str(error.value) == f"Knowledge base not found: {missing_path}"
+
+
 def test_from_csv_rejects_missing_required_columns(tmp_path: Path) -> None:
     path = tmp_path / "missing_column.csv"
     path.write_text('pregunta\n"¿Cómo solicito un turno?"\n', encoding="utf-8")
@@ -100,6 +109,14 @@ def test_documents_and_e5_passage_prefix_are_indexed(
     assert first_embedding_call.args[0] == [
         f"passage: {document}" for document in expected_documents
     ]
+    assert first_embedding_call.kwargs == {
+        "convert_to_numpy": True,
+        "normalize_embeddings": True,
+    }
+    pipeline_doubles.chroma_client.create_collection.assert_called_once_with(
+        name="medical_office_knowledge",
+        metadata={"hnsw:space": "cosine"},
+    )
 
 
 def test_e5_query_prefix_is_sent_to_embedder(
@@ -112,6 +129,10 @@ def test_e5_query_prefix_is_sent_to_embedder(
 
     last_embedding_call = pipeline_doubles.embedding.encode.call_args_list[-1]
     assert last_embedding_call.args[0] == ["query: ¿Cómo reservo?"]
+    assert last_embedding_call.kwargs == {
+        "convert_to_numpy": True,
+        "normalize_embeddings": True,
+    }
     assert retrieval == RetrievalResult(
         documents=[pipeline_doubles.indexed["documents"][0]],
         metadatas=[pipeline_doubles.indexed["metadatas"][0]],
