@@ -55,6 +55,9 @@ def test_from_csv_loads_valid_knowledge_base(
     assert chatbot.embedding_model is chatbot.retriever.embedding_model
     assert chatbot.client is chatbot.retriever.client
     assert chatbot.collection is chatbot.retriever.collection
+    assert chatbot.device == chatbot.generator.device
+    assert chatbot.tokenizer is chatbot.generator.tokenizer
+    assert chatbot.llm is chatbot.generator.llm
 
 
 def test_from_csv_rejects_missing_file_before_loading_models(tmp_path: Path) -> None:
@@ -156,6 +159,23 @@ def test_facade_uses_reassigned_top_k_for_retrieval(
     chatbot.retrieve_context("Consulta")
 
     assert pipeline_doubles.collection.query.call_args.kwargs["n_results"] == 1
+
+
+def test_facade_forwards_reassigned_generation_attributes(
+    tmp_path: Path,
+    pipeline_doubles: object,
+) -> None:
+    chatbot = build_chatbot(tmp_path)
+    replacement_tokenizer = object()
+    replacement_llm = object()
+
+    chatbot.device = "cuda"
+    chatbot.tokenizer = replacement_tokenizer
+    chatbot.llm = replacement_llm
+
+    assert chatbot.generator.device == "cuda"
+    assert chatbot.generator.tokenizer is replacement_tokenizer
+    assert chatbot.generator.llm is replacement_llm
 
 
 @pytest.mark.parametrize("top_k", [0, -1])

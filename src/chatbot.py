@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import pandas as pd
-import torch
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
 from .config import DEFAULT_RAG_CONFIG
+from .generation import FlanT5Generator
 from .knowledge_base import (
     REQUIRED_COLUMNS as KNOWLEDGE_BASE_REQUIRED_COLUMNS,
     build_documents,
@@ -24,9 +23,10 @@ from .retrieval import (
     uses_e5,
     validate_top_k,
 )
+from .service import RAGService
 
 
-class MedicalRAGChatbot:
+class MedicalRAGChatbot(RAGService):
     """RAG chatbot for administrative questions about a medical office."""
 
     REQUIRED_COLUMNS = set(KNOWLEDGE_BASE_REQUIRED_COLUMNS)
@@ -64,11 +64,35 @@ class MedicalRAGChatbot:
         self.client = self.retriever.client
         self.collection = self.retriever.collection
 
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.tokenizer = AutoTokenizer.from_pretrained(self.llm_model_name)
-        self.llm = AutoModelForSeq2SeqLM.from_pretrained(self.llm_model_name).to(
-            self.device
+        generator = FlanT5Generator(llm_model_name=self.llm_model_name)
+        super().__init__(
+            retriever=self.retriever,
+            generator=generator,
         )
+
+    @property
+    def device(self) -> str:
+        return self.generator.device
+
+    @device.setter
+    def device(self, value: str) -> None:
+        self.generator.device = value
+
+    @property
+    def tokenizer(self) -> Any:
+        return self.generator.tokenizer
+
+    @tokenizer.setter
+    def tokenizer(self, value: Any) -> None:
+        self.generator.tokenizer = value
+
+    @property
+    def llm(self) -> Any:
+        return self.generator.llm
+
+    @llm.setter
+    def llm(self, value: Any) -> None:
+        self.generator.llm = value
 
     @classmethod
     def from_csv(
@@ -113,45 +137,7 @@ class MedicalRAGChatbot:
         self.retriever.documents = self.documents
         self.retriever.top_k = self.top_k
         self.retriever.collection = self.collection
-        return self.retriever.retrieve(question)
+        return super().retrieve_context(question)
 
     def answer(self, question: str) -> str:
-        retrieval = self.retrieve_context(question)
-        context = "\n\n".join(retrieval.documents)
-
-        prompt = f"""
-Use the context to answer the question.
-Answer only in Spanish.
-Do not invent information.
-If the context does not contain enough information, say that the consultorio should be contacted directly.
-
-Context:
-{context}
-
-Question:
-{question}
-
-Answer in Spanish:
-""".strip()
-
-        inputs = self.tokenizer(
-            prompt,
-            return_tensors=DEFAULT_RAG_CONFIG.tokenizer_return_tensors,
-            truncation=DEFAULT_RAG_CONFIG.tokenizer_truncation,
-            max_length=DEFAULT_RAG_CONFIG.tokenizer_max_length,
-        )
-        inputs = {key: value.to(self.device) for key, value in inputs.items()}
-
-        with torch.inference_mode():
-            outputs = self.llm.generate(
-                **inputs,
-                max_new_tokens=DEFAULT_RAG_CONFIG.max_new_tokens,
-                do_sample=DEFAULT_RAG_CONFIG.do_sample,
-                num_beams=DEFAULT_RAG_CONFIG.num_beams,
-            )
-
-        response = self.tokenizer.decode(
-            outputs[0],
-            skip_special_tokens=DEFAULT_RAG_CONFIG.skip_special_tokens,
-        )
-        return response.strip()
+        return super().answer(question)

@@ -195,22 +195,16 @@ def test_retrieval_result_remains_available_from_public_locations() -> None:
     assert chatbot_module.RetrievalResult is RetrievalResult
 
 
-def test_import_src_does_not_import_chroma_or_sentence_transformers() -> None:
+def test_import_src_does_not_import_ml_or_vector_integrations() -> None:
     project_root = Path(__file__).resolve().parents[1]
     script = """
 import importlib.abc
 import sys
 from types import ModuleType
 
-for module_name in ("pandas", "torch"):
-    sys.modules[module_name] = ModuleType(module_name)
+sys.modules["pandas"] = ModuleType("pandas")
 
-transformers = ModuleType("transformers")
-transformers.AutoModelForSeq2SeqLM = object()
-transformers.AutoTokenizer = object()
-sys.modules["transformers"] = transformers
-
-blocked = {"chromadb", "sentence_transformers"}
+blocked = {"chromadb", "sentence_transformers", "torch", "transformers"}
 
 class BlockedImportFinder(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
@@ -222,11 +216,15 @@ sys.meta_path.insert(0, BlockedImportFinder())
 
 import src
 import src.chatbot as chatbot_module
+import src.generation as generation_module
 import src.retrieval as retrieval_module
+import src.service as service_module
 
 assert src.MedicalRAGChatbot is chatbot_module.MedicalRAGChatbot
 assert src.RetrievalResult is chatbot_module.RetrievalResult
 assert src.RetrievalResult is retrieval_module.RetrievalResult
+assert generation_module.FlanT5Generator
+assert service_module.RAGService
 assert not blocked.intersection(sys.modules)
 """
     environment = {
