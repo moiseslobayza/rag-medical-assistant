@@ -7,12 +7,13 @@ from unittest.mock import Mock, call
 import pandas as pd
 import pytest
 
-import src.evaluation as evaluation_module
+import src.retrieval as retrieval_module
 from src.evaluation import (
     EmbeddingRetrieverEvaluator,
     EvaluationCase,
     compare_embedding_models,
 )
+from src.retrieval import ChromaRetriever
 
 
 E5_MODEL = "intfloat/multilingual-e5-small"
@@ -110,13 +111,13 @@ def install_evaluation_doubles(
     chroma_factory = Mock(name="chroma_factory", return_value=client)
 
     monkeypatch.setattr(
-        evaluation_module,
-        "SentenceTransformer",
+        retrieval_module,
+        "_load_embedding_model",
         embedding_factory,
     )
     monkeypatch.setattr(
-        evaluation_module.chromadb,
-        "EphemeralClient",
+        retrieval_module,
+        "_create_chroma_client",
         chroma_factory,
     )
 
@@ -169,6 +170,8 @@ def test_evaluate_returns_contract_columns_metrics_and_query_order(
         ),
     ]
     doubles = build_evaluator(monkeypatch, query_rankings=rankings)
+    retrieve = Mock(wraps=doubles.evaluator.retriever.retrieve)
+    monkeypatch.setattr(doubles.evaluator.retriever, "retrieve", retrieve)
     cases = [
         EvaluationCase("Consulta uno", QUESTIONS[0]),
         EvaluationCase("Consulta dos", QUESTIONS[1]),
@@ -198,6 +201,8 @@ def test_evaluate_returns_contract_columns_metrics_and_query_order(
         True,
     ]
     assert details["expected_rank"].tolist() == [1, 1, 1, 3, 3, 3, 5, 5, 5]
+    assert retrieve.call_args_list == [call(case.query) for case in cases]
+    assert doubles.evaluator.retriever.top_k == 5
 
     metrics = summary.set_index("top_k")
     assert summary["top_k"].tolist() == [5, 3, 1]
@@ -426,10 +431,19 @@ def test_from_csv_cleans_rows_and_builds_current_evaluation_artifacts(
         '"Pregunta sin respuesta",\n',
         encoding="utf-8",
     )
-    install_evaluation_doubles(monkeypatch)
+    doubles = install_evaluation_doubles(monkeypatch)
 
     evaluator = EmbeddingRetrieverEvaluator.from_csv(path, E5_MODEL)
 
+    assert isinstance(evaluator.retriever, ChromaRetriever)
+    assert evaluator.documents is evaluator.retriever.documents
+    assert evaluator.ids is evaluator.retriever.ids
+    assert evaluator.metadatas is evaluator.retriever.metadatas
+    assert evaluator.embedding_model is evaluator.retriever.embedding_model
+    assert evaluator.client is evaluator.retriever.client
+    assert evaluator.collection is evaluator.retriever.collection
+    doubles.embedding_factory.assert_called_once_with(E5_MODEL)
+    doubles.chroma_factory.assert_called_once_with()
     assert evaluator.knowledge_base.to_dict("records") == [
         {"pregunta": "Pregunta valida", "respuesta": "Respuesta valida"}
     ]

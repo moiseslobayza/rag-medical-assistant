@@ -216,6 +216,7 @@ sys.meta_path.insert(0, BlockedImportFinder())
 
 import src
 import src.chatbot as chatbot_module
+import src.evaluation as evaluation_module
 import src.generation as generation_module
 import src.retrieval as retrieval_module
 import src.service as service_module
@@ -223,6 +224,7 @@ import src.service as service_module
 assert src.MedicalRAGChatbot is chatbot_module.MedicalRAGChatbot
 assert src.RetrievalResult is chatbot_module.RetrievalResult
 assert src.RetrievalResult is retrieval_module.RetrievalResult
+assert evaluation_module.EmbeddingRetrieverEvaluator
 assert generation_module.FlanT5Generator
 assert service_module.RAGService
 assert not blocked.intersection(sys.modules)

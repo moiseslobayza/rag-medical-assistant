@@ -5,9 +5,17 @@ from pathlib import Path
 from typing import Sequence
 from uuid import uuid4
 
-import chromadb
 import pandas as pd
-from sentence_transformers import SentenceTransformer
+
+from .knowledge_base import (
+    REQUIRED_COLUMNS as KNOWLEDGE_BASE_REQUIRED_COLUMNS,
+    build_documents,
+    build_ids,
+    build_metadatas,
+    load_knowledge_base,
+    validate_knowledge_base,
+)
+from .retrieval import ChromaRetriever, RetrievalResult
 
 
 @dataclass(frozen=True)
@@ -19,7 +27,7 @@ class EvaluationCase:
 class EmbeddingRetrieverEvaluator:
     """Evaluate semantic retrieval independently from the generative model."""
 
-    REQUIRED_COLUMNS = {"pregunta", "respuesta"}
+    REQUIRED_COLUMNS = set(KNOWLEDGE_BASE_REQUIRED_COLUMNS)
 
     def __init__(
         self,
@@ -28,36 +36,44 @@ class EmbeddingRetrieverEvaluator:
     ) -> None:
         self.knowledge_base = self._validate_knowledge_base(knowledge_base)
         self.embedding_model_name = embedding_model
-        self.embedding_model = SentenceTransformer(self.embedding_model_name)
-
-        self.documents = [
-            f"Pregunta frecuente: {row.pregunta}\nRespuesta: {row.respuesta}"
-            for row in self.knowledge_base.itertuples(index=False)
-        ]
+        self.documents = build_documents(self.knowledge_base)
+        self.ids = build_ids(self.documents)
         self.metadatas = [
-            {"pregunta_original": str(row.pregunta)}
-            for row in self.knowledge_base.itertuples(index=False)
+            {"pregunta_original": metadata["pregunta_original"]}
+            for metadata in build_metadatas(self.knowledge_base)
         ]
-        self.ids = [f"doc_{index}" for index in range(len(self.documents))]
 
-        prepared_documents = self._prepare_documents(self.documents)
-        embeddings = self.embedding_model.encode(
-            prepared_documents,
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-        ).tolist()
-
-        self.client = chromadb.EphemeralClient()
         collection_name = f"embedding_eval_{uuid4().hex[:12]}"
-        self.collection = self.client.create_collection(
-            name=collection_name,
-            metadata={"hnsw:space": "cosine"},
-        )
-        self.collection.add(
+        self.retriever = self._create_retriever(
+            embedding_model_name=self.embedding_model_name,
             ids=self.ids,
             documents=self.documents,
-            embeddings=embeddings,
             metadatas=self.metadatas,
+            collection_name=collection_name,
+        )
+        self.documents = self.retriever.documents
+        self.ids = self.retriever.ids
+        self.metadatas = self.retriever.metadatas
+        self.embedding_model = self.retriever.embedding_model
+        self.client = self.retriever.client
+        self.collection = self.retriever.collection
+
+    @staticmethod
+    def _create_retriever(
+        *,
+        documents: Sequence[str],
+        ids: Sequence[str],
+        metadatas: Sequence[dict[str, str]],
+        embedding_model_name: str,
+        collection_name: str,
+    ) -> ChromaRetriever:
+        return ChromaRetriever(
+            documents=documents,
+            ids=ids,
+            metadatas=metadatas,
+            embedding_model_name=embedding_model_name,
+            collection_name=collection_name,
+            top_k=len(documents),
         )
 
     @classmethod
@@ -66,51 +82,28 @@ class EmbeddingRetrieverEvaluator:
         path: str | Path,
         embedding_model: str,
     ) -> "EmbeddingRetrieverEvaluator":
-        csv_path = Path(path)
-        if not csv_path.exists():
-            raise FileNotFoundError(f"Knowledge base not found: {csv_path}")
-
         return cls(
-            knowledge_base=pd.read_csv(csv_path),
+            knowledge_base=load_knowledge_base(path),
             embedding_model=embedding_model,
         )
 
     @classmethod
     def _validate_knowledge_base(cls, knowledge_base: pd.DataFrame) -> pd.DataFrame:
-        missing_columns = cls.REQUIRED_COLUMNS - set(knowledge_base.columns)
-        if missing_columns:
-            missing = ", ".join(sorted(missing_columns))
-            raise ValueError(f"Missing required columns: {missing}")
+        return validate_knowledge_base(
+            knowledge_base,
+            required_columns=cls.REQUIRED_COLUMNS,
+        )
 
-        validated = knowledge_base.copy()
-        validated = validated.dropna(subset=["pregunta", "respuesta"])
-        validated["pregunta"] = validated["pregunta"].astype(str).str.strip()
-        validated["respuesta"] = validated["respuesta"].astype(str).str.strip()
-        validated = validated[
-            (validated["pregunta"] != "") & (validated["respuesta"] != "")
-        ].reset_index(drop=True)
-
-        if validated.empty:
-            raise ValueError("The knowledge base contains no valid records.")
-
-        return validated
-
-    def _uses_e5(self) -> bool:
-        return "e5" in self.embedding_model_name.lower()
-
-    def _prepare_documents(self, documents: Sequence[str]) -> list[str]:
-        if self._uses_e5():
-            return [f"passage: {document}" for document in documents]
-        return list(documents)
-
-    def _prepare_query(self, query: str) -> str:
-        query = query.strip()
-        if not query:
+    def _retrieve(self, query: str, top_k: int) -> RetrievalResult:
+        if not query.strip():
             raise ValueError("Evaluation queries cannot be empty.")
 
-        if self._uses_e5():
-            return f"query: {query}"
-        return query
+        self.retriever.embedding_model_name = self.embedding_model_name
+        self.retriever.embedding_model = self.embedding_model
+        self.retriever.documents = self.documents
+        self.retriever.collection = self.collection
+        self.retriever.top_k = top_k
+        return self.retriever.retrieve(query)
 
     def evaluate(
         self,
@@ -128,23 +121,13 @@ class EmbeddingRetrieverEvaluator:
         detail_rows: list[dict[str, object]] = []
 
         for case in cases:
-            prepared_query = self._prepare_query(case.query)
-            query_embedding = self.embedding_model.encode(
-                [prepared_query],
-                convert_to_numpy=True,
-                normalize_embeddings=True,
-            ).tolist()
-
-            results = self.collection.query(
-                query_embeddings=query_embedding,
-                n_results=max_top_k,
-            )
+            result = self._retrieve(case.query, max_top_k)
 
             retrieved_questions = [
                 str(metadata["pregunta_original"])
-                for metadata in results["metadatas"][0]
+                for metadata in result.metadatas
             ]
-            distances = [float(value) for value in results["distances"][0]]
+            distances = [float(value) for value in result.distances]
 
             try:
                 expected_rank = retrieved_questions.index(case.expected_question) + 1
